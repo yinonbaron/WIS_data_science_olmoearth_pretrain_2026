@@ -1,10 +1,3 @@
 __pycache__/
-olmoearth_pretrain.egg-info/
-olmoearth_pretrain.egg-info/top_level.txt
-olmoearth_pretrain.egg-info/SOURCES.txt
-olmoearth_pretrain.egg-info/requires.txt
-olmoearth_pretrain.egg-info/PKG-INFO
-olmoearth_pretrain.egg-info/dependency_links.txt
-olmoearth_pretrain/data/__pycache__/dataset.cpython-312.pyc
-olmoearth_pretrain/data/__pycache__/__init__.cpython-312.pyc
-olmoearth_pretrain/__pycache__/__init__.cpython-312.pyc
+*.pyc
+*.egg-info/
