@@ -72,13 +72,13 @@ class PatchEmbeddings(nn.Module):
         Args:
             x: a dictionary containing the input data and timestamps for a specific modality, with keys:
                 - modality: a tensor of shape (B, H, W, T, C) containing the input data for the modality
-                - modality_mask: a tensor of shape (B, H, W, T) containing the input mask for the modality
+                - modality_mask: a tensor of shape (B, H, W, T, C) containing the input mask for the modality
                 - timestamps: a tensor of shape (B, T, 3) containing the timestamps for each patch, where the last dimension contains (day, month, year)
             modality: the name of the modality for which to create the patch embeddings
         Returns:
             a dictionary containing the patchified and embedded output for the modality, along with the corresponding output mask and timestamps, with keys:
-                - modality: a tensor of shape (B, H', W', T, D) containing the patchified and embedded output for the modality, where H' and W' are the height and width of the patchified data
-                - modality_mask: a tensor of shape (B, H', W', T) containing the output mask for the modality, where H' and W' are the height and width of the patchified data
+                - modality: a tensor of shape (B, H', W', T, Bs, D) containing the patchified and embedded output for the modality, where H' and W' are the height and width of the patchified data, Bs is the number of band sets, and D is the embedding size
+                - modality_mask: a tensor of shape (B, H', W', T, Bs) containing the output mask for the modality, where H' and W' are the height and width of the patchified data, Bs is the number of band sets, and T is the number of time steps
                 - timestamps: a tensor of shape (B, T, 3) containing the timestamps for each patch, where the last dimension contains (day, month, year)
         '''
 
@@ -118,7 +118,7 @@ class CompositeEncoding(nn.Module):
                 - modality: a tensor of shape (B, H', W', T, C) containing the patchified data for the modality
                 - timestamps: a tensor of shape (B, T, 3) containing the timestamps for each patch, where the last dimension contains (day, month, year)
         Returns:
-            a tensor of shape (B, H', W', T, D) containing the combined encoding for the modality, where D is the embedding size
+            a tensor of shape (B, H', W', T, Bs, D) containing the combined encoding for the modality, where Bs, is the number of band sets and D is the embedding size
         '''
         
         #PUT YOUR CODE HERE
