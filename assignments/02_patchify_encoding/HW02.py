@@ -128,7 +128,7 @@ class PatchEmbeddings(nn.Module):
             patchified_outputs.append(patchifier(bandset_data))
         
         # Combine the patchified bandsets by summing them together
-        out_data = torch.stack(patchified_outputs, dim=0).sum(dim=0)
+        out_data = torch.stack(patchified_outputs, dim=4)
         
         # Downsample the mask to match the new spatial dimensions H' and W'
         # Stride slicing works perfectly here since stride = patch_size
@@ -170,26 +170,28 @@ class CompositeEncoding(nn.Module):
         self.d_enc = embedding_size // 4
         
         # 1. Channel Encoding: Learnable embedding
-        # We use a simple learnable parameter. It will be broadcasted across patches/time.
-        self.channel_embed = nn.Parameter(torch.randn(self.d_enc))
+        self.num_bandsets = len(BANDSETS[modality])
+        self.channel_embed = nn.Embedding(self.num_bandsets, self.d_enc)
+        nn.init.zeros_(self.channel_embed.weight)
         
-        # 3. Month Encoding: Fixed embedding (Months 1-12, +1 for padding/0-index safety)
-        self.month_embed = nn.Embedding(13, self.d_enc)
-        
-        # Note: Time and Space encodings are fixed sinusoidal, which we will compute dynamically 
-        # in the forward pass to match sequence lengths and spatial grids.
+        # 3. Month Encoding: Fixed embedding
+        angles = torch.arange(0, 13) / (12 / (2 * 3.141592653589793))
+        dim_per_table = self.d_enc // 2
+        sin_table = torch.sin(angles.unsqueeze(-1).expand(-1, dim_per_table))
+        cos_table = torch.cos(angles.unsqueeze(-1).expand(-1, dim_per_table))
+        month_table = torch.cat([sin_table[:-1], cos_table[:-1]], dim=-1)
+        self.month_embed = nn.Embedding.from_pretrained(month_table, freeze=True)
 
     def _get_sinusoidal_encoding(self, positions: torch.Tensor, dim: int) -> torch.Tensor:
         """Helper to create fixed sinusoidal embeddings based on positions."""
-        # positions shape could be (B, T) or similar
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2, device=positions.device).float() / dim))
+        omega = torch.arange(dim // 2, device=positions.device) / dim / 2.0
+        inv_freq = 1.0 / (10000 ** omega)
         
-        # Compute sine and cosine
-        sin_enc = torch.sin(positions.unsqueeze(-1) * inv_freq)
-        cos_enc = torch.cos(positions.unsqueeze(-1) * inv_freq)
+        out = positions.unsqueeze(-1) * inv_freq
+        sin_enc = torch.sin(out)
+        cos_enc = torch.cos(out)
         
-        # Interleave sine and cosine (Result shape: ..., dim)
-        enc = torch.stack([sin_enc, cos_enc], dim=-1).flatten(-2)
+        enc = torch.cat([sin_enc, cos_enc], dim=-1)
         return enc
 
     def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -207,42 +209,37 @@ class CompositeEncoding(nn.Module):
         patch_data = x[self.modality]  # (B, H', W', T, C/D)
         timestamps = x['timestamps']   # (B, T, 3) -> Last dim is (day, month, year)
         
-        B, H_prime, W_prime, T, D = patch_data.shape
+        B, H_prime, W_prime, T, Bs, D = patch_data.shape
         device = patch_data.device
         
-        # 1. Channel Encoding (Shape: B, H', W', T, d_enc)
-        # Broadcast the learnable parameter across all batch, spatial, and temporal dimensions
-        c_enc = self.channel_embed.view(1, 1, 1, 1, self.d_enc).expand(B, H_prime, W_prime, T, self.d_enc)
+        # 1. Channel Encoding
+        c_idx = torch.arange(Bs, device=device)
+        c_enc_base = self.channel_embed(c_idx)
+        c_enc = c_enc_base.view(1, 1, 1, 1, Bs, self.d_enc).expand(B, H_prime, W_prime, T, Bs, self.d_enc)
         
-        # 2. Time Encoding (Based on years/days or simple sequential time)
-        # For simplicity in this structure, we use the temporal index. 
-        # Alternatively, you can calculate a continuous timestamp from (day, month, year).
+        # 2. Time Encoding
         t_positions = torch.arange(T, device=device).unsqueeze(0).expand(B, T)
-        t_enc_base = self._get_sinusoidal_encoding(t_positions, self.d_enc) # (B, T, d_enc)
-        t_enc = t_enc_base.view(B, 1, 1, T, self.d_enc).expand(B, H_prime, W_prime, T, self.d_enc)
+        t_enc_base = self._get_sinusoidal_encoding(t_positions, self.d_enc)
+        t_enc = t_enc_base.view(B, 1, 1, T, 1, self.d_enc).expand(B, H_prime, W_prime, T, Bs, self.d_enc)
         
         # 3. Month Encoding
-        months = timestamps[..., 1].long() # Extract month from index 1 (B, T)
-        m_enc_base = self.month_embed(months) # (B, T, d_enc)
-        m_enc = m_enc_base.view(B, 1, 1, T, self.d_enc).expand(B, H_prime, W_prime, T, self.d_enc)
+        months_idx = timestamps[..., 1].long()
+        m_enc_base = self.month_embed(months_idx)
+        m_enc = m_enc_base.view(B, 1, 1, T, 1, self.d_enc).expand(B, H_prime, W_prime, T, Bs, self.d_enc)
         
-        # 4. Space Encoding (Based on spatial location)
-        # We create a 2D meshgrid for spatial coordinates
-        y_pos = torch.arange(H_prime, device=device)
-        x_pos = torch.arange(W_prime, device=device)
+        # 4. Space Encoding
+        y_pos = torch.arange(H_prime, device=device) * PATCH_SIZE
+        x_pos = torch.arange(W_prime, device=device) * PATCH_SIZE
         grid_y, grid_x = torch.meshgrid(y_pos, x_pos, indexing='ij')
         
-        # Since space encoding needs to fit in d_enc, we divide d_enc by 2 for X and Y components
         s_dim = self.d_enc // 2
-        y_enc = self._get_sinusoidal_encoding(grid_y, s_dim) # (H', W', s_dim)
-        x_enc = self._get_sinusoidal_encoding(grid_x, s_dim) # (H', W', s_dim)
+        y_enc = self._get_sinusoidal_encoding(grid_y, s_dim)
+        x_enc = self._get_sinusoidal_encoding(grid_x, s_dim)
         
-        # Concatenate X and Y spatial encodings
-        s_enc_base = torch.cat([y_enc, x_enc], dim=-1) # (H', W', d_enc)
-        s_enc = s_enc_base.view(1, H_prime, W_prime, 1, self.d_enc).expand(B, H_prime, W_prime, T, self.d_enc)
+        # Note: concatenate x then y!
+        s_enc_base = torch.cat([x_enc, y_enc], dim=-1)
+        s_enc = s_enc_base.view(1, H_prime, W_prime, 1, 1, self.d_enc).expand(B, H_prime, W_prime, T, Bs, self.d_enc)
         
-        # Finally, concatenate all four encodings along the feature dimension
-        # Output shape will be (B, H', W', T, d_enc * 4) -> (B, H', W', T, D)
         composite = torch.cat([c_enc, t_enc, m_enc, s_enc], dim=-1)
         
         return composite
