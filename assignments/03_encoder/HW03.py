@@ -2,8 +2,10 @@ from WIS_DSP_lib.constants import *
 import torch
 from torch import nn
 from einops import rearrange
-from WIS_DSP_lib.patchify import PatchEmbeddings, CompositeEncoding
 import torch.nn.functional as F
+
+# ADD CODE FOR PATCH EMBEDDINGS AND COMPOSITE ENCODING FROM HW02 HERE
+
 class Attention(nn.Module):
     '''
     Multi-head attention module that supports separate key/value inputs for self or cross-attention.
