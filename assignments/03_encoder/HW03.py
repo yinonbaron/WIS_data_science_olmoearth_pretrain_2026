@@ -20,7 +20,24 @@ class Attention(nn.Module):
         '''
         super().__init__()
         
-        #PUT YOUR CODE HERE
+        self.num_heads = num_heads
+        self.embedding_size = embedding_size
+        self.head_dim = embedding_size // num_heads
+
+        # Scaling factor: standard in transformers to prevent dot products from getting too large
+        self.scale = self.head_dim ** -0.5
+
+        # Projections:
+        # 1. Query projection (always comes from the primary input 'x')
+        self.q_proj = nn.Linear(embedding_size, embedding_size)
+        
+        # 2. Key and Value projections 
+        # (might come from 'x' for self-attention, or 'y' for cross-attention)
+        self.k_proj = nn.Linear(embedding_size, embedding_size)
+        self.v_proj = nn.Linear(embedding_size, embedding_size)
+        
+        # 3. Final output projection to mix the heads back together
+        self.out_proj = nn.Linear(embedding_size, embedding_size)
 
     def forward(self, x: torch.Tensor, y: torch.Tensor=None, attn_mask: torch.Tensor=None) -> torch.Tensor:
         '''
@@ -33,8 +50,54 @@ class Attention(nn.Module):
             This mask will be applied to the attention weights to prevent attending to certain positions. If None, no masking will be applied.
         
         '''
+        # x shape: (B, Seq_Len_Q, D), B = number of images in batch, Seq_Len_Q = num of patches in the image sequence (H'*W'*T*Bs), D = embedding dimension
+        B, N_q, D = x.shape
         
-        #PUT YOUR CODE HERE
+        # If y is not provided, this is Self-Attention. y becomes x.
+        if y is None:
+            y = x
+            
+        # y shape: (B, Seq_Len_KV, D), Seq_Len_KV = num of patches in the sequence
+        _, N_kv, _ = y.shape
+        
+        # 1. Project to get Queries, Keys, and Values
+        # We immediately reshape them to separate the heads: (B, Seq_Len, num_heads, head_dim)
+        # Then we transpose dimensions 1 and 2 so the sequence length is the innermost dimension for matrix multiplication
+        q = rearrange(self.q(x), 'B N_q (num_heads head_dim) -> B num_heads N_q head_dim', num_heads=self.num_heads, head_dim=self.head_dim)
+        k = rearrange(self.k(y), 'B N_kv (num_heads head_dim) -> B num_heads N_kv head_dim', num_heads=self.num_heads, head_dim=self.head_dim)
+        v = rearrange(self.v(y), 'B N_kv (num_heads head_dim) -> B num_heads N_kv head_dim', num_heads=self.num_heads, head_dim=self.head_dim)
+        
+        # 2. Calculate Attention Scores (Q * K^T) -> B num_heads N_q head_dim @ B num_heads head_dim N_kv => (B, num_heads, N_q, N_kv), 4D multiplication mult the last two dimensions.
+        # This is like a 2D matrix of 2D matrices: for each sample in the batch, for each head, we have a (N_q, head_dim) query matrix multiplied by a (head_dim, N_kv) key matrix, resulting in a (N_q, N_kv) score matrix for each head.
+        # This way we concat the heads for the same token? is it what we want to do?
+        # We use torch.matmul (@) to multiply the queries by the keys. 
+        # k.transpose(-2, -1) flips the last two dimensions of K so the shapes align for dot product.
+        scores = (q @ k.transpose(-2, -1)) * self.scale # (B, num_heads, N_q, N_kv)
+
+        # 3. Apply the Mask (Optional)
+        if attn_mask is not None:
+            # attn_mask is a True/False matrix where True indicates positions that should be masked (not attended to).
+            # attn_mask is usually (B, sequence length). We need it to broadcast to (B, num_heads, N_q, N_kv).
+            # We replace True (masked) values with a massive negative number (-1e9).
+            # When passed through softmax, e^(-1e9) becomes 0, so the network completely ignores those patches.
+            # The mask is on the y patches (N_kv)
+            scores = scores.masked_fill(attn_mask.unsqueeze(1).unsqueeze(2), float('-1e9'))
+            
+        # 4. Convert scores to probabilities (Softmax)
+        attn_weights = F.softmax(scores, dim=-1)
+        
+        # 5. Multiply by Values
+        # We multiply our probability weights by the actual information (V)
+        out = attn_weights @ v # Shape: (B, num_heads, N_q, head_dim)
+        
+        # 6. Re-assemble the heads
+        # Transpose back to (B, N_q, num_heads, head_dim) and flatten the last two dimensions to get back to (B, N_q, D)
+        # contiguous() is used to ensure the tensor is stored in memory transposed (1,2), which is necessary for the view operation to work correctly.
+        out = out.transpose(1, 2).contiguous().view(B, N_q, D)
+        
+        # 7. Final linear projection
+        return self.out_proj(out)
+        
 
 class AttentionBlock(nn.Module):
     '''
