@@ -280,9 +280,8 @@ class Encoder(BaseEncoderDecoder):
         # Project the final single vector.
         projected = self.projector(pooled)
 
-        # Return: 
-        # 1. The processed sequence
-        # 2. The global projected summary vector
-        # 3. The 1D mask used 
-        # 4. The final sequence with the masked tokens put back in place
-        return x_processed, projected, flat_mask, x_restored
+        return {
+            self.modality: x_restored,                 # Maps to output[MODALITY]
+            f"{self.modality}_mask": flat_mask,        # Maps to output["sentinel2_l2a_mask"]
+            "pooled_tokens": projected                 # Maps to output["pooled_tokens"]
+        }
