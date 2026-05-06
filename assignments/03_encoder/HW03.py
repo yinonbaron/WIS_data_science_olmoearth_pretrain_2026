@@ -3,8 +3,7 @@ import torch
 from torch import nn
 from einops import rearrange
 import torch.nn.functional as F
-
-# ADD CODE FOR PATCH EMBEDDINGS AND COMPOSITE ENCODING FROM HW02 HERE
+from assignments.HW02 import PatchEmbeddings, CompositeEncoding
 
 class Attention(nn.Module):
     '''
