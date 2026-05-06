@@ -63,9 +63,9 @@ class Attention(nn.Module):
         # 1. Project to get Queries, Keys, and Values
         # We immediately reshape them to separate the heads: (B, Seq_Len, num_heads, head_dim)
         # Then we transpose dimensions 1 and 2 so the sequence length is the innermost dimension for matrix multiplication
-        q = rearrange(self.q(x), 'B N_q (num_heads head_dim) -> B num_heads N_q head_dim', num_heads=self.num_heads, head_dim=self.head_dim)
-        k = rearrange(self.k(y), 'B N_kv (num_heads head_dim) -> B num_heads N_kv head_dim', num_heads=self.num_heads, head_dim=self.head_dim)
-        v = rearrange(self.v(y), 'B N_kv (num_heads head_dim) -> B num_heads N_kv head_dim', num_heads=self.num_heads, head_dim=self.head_dim)
+        q = rearrange(self.q_proj(x), 'B N_q (num_heads head_dim) -> B num_heads N_q head_dim', num_heads=self.num_heads, head_dim=self.head_dim)
+        k = rearrange(self.k_proj(y), 'B N_kv (num_heads head_dim) -> B num_heads N_kv head_dim', num_heads=self.num_heads, head_dim=self.head_dim)
+        v = rearrange(self.v_proj(y), 'B N_kv (num_heads head_dim) -> B num_heads N_kv head_dim', num_heads=self.num_heads, head_dim=self.head_dim)
         
         # 2. Calculate Attention Scores (Q * K^T) -> B num_heads N_q head_dim @ B num_heads head_dim N_kv => (B, num_heads, N_q, N_kv), 4D multiplication mult the last two dimensions.
         # This is like a 2D matrix of 2D matrices: for each sample in the batch, for each head, we have a (N_q, head_dim) query matrix multiplied by a (head_dim, N_kv) key matrix, resulting in a (N_q, N_kv) score matrix for each head.
@@ -115,8 +115,25 @@ class AttentionBlock(nn.Module):
         '''
 
         super().__init__()
+        # Should we dropout?
+        # 1. First Layer Normalization (applied before Attention)
+        self.norm1 = nn.LayerNorm(embedding_size)
         
-        #PUT YOUR CODE HERE
+        # 2. The Multi-Head Attention module we just built
+        self.attn = Attention(embedding_size, num_heads)
+        
+        # 3. Second Layer Normalization (applied before the MLP)
+        self.norm2 = nn.LayerNorm(embedding_size)
+        
+        # 4. The Feed-Forward Network (MLP)
+        # We expand the embedding size by the mlp_ratio (typically 4x) to give the network 
+        # a larger "hidden workspace" to process the attention results, then project it back down.
+        hidden_dim = embedding_size * mlp_ratio
+        self.mlp = nn.Sequential(
+            nn.Linear(embedding_size, hidden_dim),
+            nn.GELU(), # Standard activation function for Transformers
+            nn.Linear(hidden_dim, embedding_size)
+        )
 
     def forward(self, x: torch.Tensor, y: torch.Tensor=None, attn_mask: torch.Tensor=None) -> torch.Tensor:
         '''
@@ -129,7 +146,19 @@ class AttentionBlock(nn.Module):
             This mask will be applied to the attention weights to prevent attending to certain positions. If None, no masking will be applied.
         '''
 
-        #PUT YOUR CODE HERE
+        # We normalize 'x' before passing it in as the Query. 
+        # We assume y is normelized
+        attn_out = self.attn(self.norm1(x), y=y, attn_mask=attn_mask)
+        
+        # Adding the attention findings back to the original input
+        x = x + attn_out
+        
+       # We normalize the updated 'x' before passing it through the Feed-Forward Network.
+        mlp_out = self.mlp(self.norm2(x))
+        
+        x = x + mlp_out
+        
+        return x
 
 class BaseEncoderDecoder(nn.Module):
     '''
@@ -179,8 +208,18 @@ class Encoder(BaseEncoderDecoder):
         '''
         super().__init__(modality, patch_size, embedding_size, num_heads, depth, mlp_ratio)
 
-        #PUT YOUR CODE HERE
+        # Patchification step
+        self.patch_embed = PatchEmbeddings(patch_size, embedding_size)
 
+        # The Mask Token
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, embedding_size))
+
+        # Final Normalization & Projector
+        # Standard in Vision Transformers to normalize before pooling.
+        self.norm = nn.LayerNorm(embedding_size)
+        
+        # This linear layer acts as a final "summary translator" to project the pooled representation.
+        self.projector = nn.Linear(embedding_size, embedding_size)
 
     def forward(self, x: dict[str, torch.Tensor], apply_attn: bool = True) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         '''
@@ -191,4 +230,59 @@ class Encoder(BaseEncoderDecoder):
             apply_attn: A boolean flag indicating whether to apply the attention blocks. 
         '''
         
-        #PUT YOUR CODE HERE
+        # --- Patchification ---
+        patch_dict = self.patch_embed(x, self.modality)
+        patch_data = patch_dict[self.modality] # (B, H', W', T, Bs, D)
+        mask = patch_dict[f'{self.modality}_mask'] # (B, H', W', T)
+
+        # --- Add Composite Encodings ---
+        encoded_data = patch_data + self.encodings(patch_dict)
+
+        # --- Flattening to Sequence ---
+        B, H, W, T, Bs, D = encoded_data.shape
+        
+        # Flatten the 6D tensor into standard 3D Transformer shape: (B, Seq_Len, D)
+        seq_data = rearrange(encoded_data, 'b h w t bs d -> b (h w t bs) d')
+        
+        # Flatten the mask. Since the mask doesn't have a Bandset (Bs) dimension initially, 
+        # we flatten it and then repeat it 'Bs' times so every bandset shares the same physical mask.
+        # Does the mask is the same for all bandsets?
+        flat_mask = rearrange(mask, 'b h w t -> b (h w t)')
+        flat_mask = flat_mask.repeat_interleave(Bs, dim=1) # (B, Seq_Len)
+
+        # --- Remove Masked Tokens ---
+        # making the attn mask matrix to indicate which tokens are masked (True) and which are not (False)
+        bool_attn_mask = (flat_mask != MaskValue.ONLINE_ENCODER) # (B, Seq_Len)
+
+        # --- Apply Attention Blocks ---
+        x_processed = seq_data
+        if apply_attn:
+            # we are preforming multi-head attention in a sequential way, passing the output of one block as the input to the next.
+            for block in self.blocks:
+                x_processed = block(x_processed, attn_mask=bool_attn_mask)
+
+        # --- Add Back the Masked Tokens ---
+        x_restored = torch.where(
+            bool_attn_mask.unsqueeze(-1), # where to add
+            self.mask_token.to(x_processed.dtype), # what to add
+            x_processed # target
+        )
+
+        # --- Global Pooling & Projection ---
+        x_norm = self.norm(x_restored)
+
+        # We make a matrix of the positions of the valid (unmasked) tokens, dimentions: (B, Seq_Len, 1). 
+        valid_mask = (~bool_attn_mask).float().unsqueeze(-1)
+        
+        # We sum all the valid tokens together, and divide by the total number of valid tokens to get the average (Mean Pooling).
+        pooled = (x_norm * valid_mask).sum(dim=1) / (valid_mask.sum(dim=1) + 1e-6)
+        
+        # Project the final single vector.
+        projected = self.projector(pooled)
+
+        # Return: 
+        # 1. The processed sequence
+        # 2. The global projected summary vector
+        # 3. The 1D mask used 
+        # 4. The final sequence with the masked tokens put back in place
+        return x_processed, projected, flat_mask, x_restored
