@@ -26,7 +26,7 @@ data_loader = DataLoader(
         batch_size=GLOBAL_BATCH_SIZE,
     )
 batch = next(iter(data_loader))
-encoder = Encoder(MODALITY, embedding_size=128, max_patch_size=8, num_heads=8, depth=4, mlp_ratio=4.0)
+encoder = Encoder(MODALITY, embedding_size=128, patch_size=8, num_heads=8, depth=4, mlp_ratio=4.0)
 output = encoder(batch[0])
 
 assert_tensor_values_equal(

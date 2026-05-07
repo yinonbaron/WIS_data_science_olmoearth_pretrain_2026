@@ -3,7 +3,10 @@ import torch
 from torch import nn
 from einops import rearrange
 import torch.nn.functional as F
-from assignments.HW02 import PatchEmbeddings, CompositeEncoding
+from pathlib import Path
+import sys
+sys.path.append(str(Path(__file__).resolve().parents[1] / "02_patchify_encoding"))
+from HW02 import PatchEmbeddings, CompositeEncoding
 
 class Attention(nn.Module):
     '''
