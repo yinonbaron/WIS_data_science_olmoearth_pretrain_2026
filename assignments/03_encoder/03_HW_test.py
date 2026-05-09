@@ -1,5 +1,5 @@
 from WIS_DSP_lib.dataloader import Dataset, DataLoader
-from HW03 import Encoder
+from HW03_ans import Encoder
 from WIS_DSP_lib.constants import *
 from WIS_DSP_lib.olmo_helper import get_dataloader, get_encoder
 from WIS_DSP_lib.test_helpers import assert_tensor_values_equal
@@ -26,7 +26,7 @@ data_loader = DataLoader(
         batch_size=GLOBAL_BATCH_SIZE,
     )
 batch = next(iter(data_loader))
-encoder = Encoder(MODALITY, embedding_size=128, max_patch_size=8, num_heads=8, depth=4, mlp_ratio=4.0)
+encoder = Encoder(MODALITY, embedding_size=128, patch_size=8, num_heads=8, depth=4, mlp_ratio=4.0)
 output = encoder(batch[0])
 
 assert_tensor_values_equal(

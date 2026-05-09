@@ -1,7 +1,7 @@
 from WIS_DSP_lib.constants import *
 import torch
 from torch import nn
-from einops import rearrange
+from einops import rearrange, repeat
 import torch.nn.functional as F
 
 # ADD CODE FOR PATCH EMBEDDINGS AND COMPOSITE ENCODING FROM HW02 HERE
