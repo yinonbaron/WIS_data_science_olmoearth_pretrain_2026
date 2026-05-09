@@ -1,5 +1,5 @@
 from WIS_DSP_lib.dataloader import Dataset, DataLoader
-from HW03_ans import Encoder
+from HW03 import Encoder
 from WIS_DSP_lib.constants import *
 from WIS_DSP_lib.olmo_helper import get_dataloader, get_encoder
 from WIS_DSP_lib.test_helpers import assert_tensor_values_equal
