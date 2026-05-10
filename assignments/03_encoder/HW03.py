@@ -130,7 +130,7 @@ class AttentionBlock(nn.Module):
         # 4. The Feed-Forward Network (MLP)
         # We expand the embedding size by the mlp_ratio (typically 4x) to give the network 
         # a larger "hidden workspace" to process the attention results, then project it back down.
-        hidden_dim = embedding_size * mlp_ratio
+        hidden_dim = int(embedding_size * mlp_ratio)
         self.mlp = nn.Sequential(
             nn.Linear(embedding_size, hidden_dim),
             nn.GELU(), # Standard activation function for Transformers
@@ -211,7 +211,7 @@ class Encoder(BaseEncoderDecoder):
         super().__init__(modality, patch_size, embedding_size, num_heads, depth, mlp_ratio)
 
         # Patchification step
-        self.patch_embed = PatchEmbeddings(patch_size, embedding_size)
+        self.patch_embed = PatchEmbeddings(patch_size, embedding_size, modality)
 
         # The Mask Token
         self.mask_token = nn.Parameter(torch.zeros(1, 1, embedding_size))
@@ -249,8 +249,7 @@ class Encoder(BaseEncoderDecoder):
         # Flatten the mask. Since the mask doesn't have a Bandset (Bs) dimension initially, 
         # we flatten it and then repeat it 'Bs' times so every bandset shares the same physical mask.
         # Does the mask is the same for all bandsets?
-        flat_mask = rearrange(mask, 'b h w t -> b (h w t)')
-        flat_mask = flat_mask.repeat_interleave(Bs, dim=1) # (B, Seq_Len)
+        flat_mask = rearrange(mask, 'b h w t bs -> b (h w t bs)')
 
         # --- Remove Masked Tokens ---
         # making the attn mask matrix to indicate which tokens are masked (True) and which are not (False)
