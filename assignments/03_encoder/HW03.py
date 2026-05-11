@@ -74,6 +74,7 @@ class Attention(nn.Module):
         # This way we concat the heads for the same token? is it what we want to do?
         # We use torch.matmul (@) to multiply the queries by the keys. 
         # k.transpose(-2, -1) flips the last two dimensions of K so the shapes align for dot product.
+        # Try with scaled_dot_product_attention
         scores = (q @ k.transpose(-2, -1)) * self.scale # (B, num_heads, N_q, N_kv)
 
         # 3. Apply the Mask (Optional)
@@ -83,7 +84,7 @@ class Attention(nn.Module):
             # We replace True (masked) values with a massive negative number (-1e9).
             # When passed through softmax, e^(-1e9) becomes 0, so the network completely ignores those patches.
             # The mask is on the y patches (N_kv)
-            scores = scores.masked_fill(attn_mask.unsqueeze(1).unsqueeze(2), float('-1e9'))
+            scores = scores.masked_fill(attn_mask.unsqueeze(1).unsqueeze(2), -np.inf)
             
         # 4. Convert scores to probabilities (Softmax)
         attn_weights = F.softmax(scores, dim=-1)
@@ -149,13 +150,14 @@ class AttentionBlock(nn.Module):
         '''
 
         # We normalize 'x' before passing it in as the Query. 
-        # We assume y is normelized
+        # We assume y is normalized - check that
         attn_out = self.attn(self.norm1(x), y=y, attn_mask=attn_mask)
         
         # Adding the attention findings back to the original input
         x = x + attn_out
         
        # We normalize the updated 'x' before passing it through the Feed-Forward Network.
+       # Memory unit - outputs the transition that will be added back to the input
         mlp_out = self.mlp(self.norm2(x))
         
         x = x + mlp_out
@@ -213,7 +215,7 @@ class Encoder(BaseEncoderDecoder):
         # Patchification step
         self.patch_embed = PatchEmbeddings(patch_size, embedding_size, modality)
 
-        # The Mask Token
+        # The Mask Token - shpuldnt be learned
         self.mask_token = nn.Parameter(torch.zeros(1, 1, embedding_size))
 
         # Final Normalization & Projector
@@ -235,7 +237,7 @@ class Encoder(BaseEncoderDecoder):
         # --- Patchification ---
         patch_dict = self.patch_embed(x, self.modality)
         patch_data = patch_dict[self.modality] # (B, H', W', T, Bs, D)
-        mask = patch_dict[f'{self.modality}_mask'] # (B, H', W', T)
+        mask = patch_dict[f'{self.modality}_mask'] # (B, H', W', T) or (B, H', W', T, Bs)
 
         # --- Add Composite Encodings ---
         encoded_data = patch_data + self.encodings(patch_dict)
@@ -246,11 +248,13 @@ class Encoder(BaseEncoderDecoder):
         # Flatten the 6D tensor into standard 3D Transformer shape: (B, Seq_Len, D)
         seq_data = rearrange(encoded_data, 'b h w t bs d -> b (h w t bs) d')
         
-        # Flatten the mask. Since the mask doesn't have a Bandset (Bs) dimension initially, 
-        # we flatten it and then repeat it 'Bs' times so every bandset shares the same physical mask.
-        # Does the mask is the same for all bandsets?
+        # Flatten the mask across all dimensions so it aligns with the token sequence.
+        # if mask.dim() == 4:
+        #     flat_mask = rearrange(mask, 'b h w t -> b (h w t)')
+        #     flat_mask = flat_mask.repeat_interleave(Bs, dim=1) # (B, Seq_Len)
+        # else:
         flat_mask = rearrange(mask, 'b h w t bs -> b (h w t bs)')
-
+        
         # --- Remove Masked Tokens ---
         # making the attn mask matrix to indicate which tokens are masked (True) and which are not (False)
         bool_attn_mask = (flat_mask != MaskValue.ONLINE_ENCODER) # (B, Seq_Len)
@@ -270,13 +274,13 @@ class Encoder(BaseEncoderDecoder):
         )
 
         # --- Global Pooling & Projection ---
-        x_norm = self.norm(x_restored)
+        # x_norm = self.norm(x_restored) # should be regular normalization, sum all the tokens together, and divide by the total number of unmasked tokens 
 
         # We make a matrix of the positions of the valid (unmasked) tokens, dimentions: (B, Seq_Len, 1). 
         valid_mask = (~bool_attn_mask).float().unsqueeze(-1)
         
         # We sum all the valid tokens together, and divide by the total number of valid tokens to get the average (Mean Pooling).
-        pooled = (x_norm * valid_mask).sum(dim=1) / (valid_mask.sum(dim=1) + 1e-6)
+        pooled = (x_restored * valid_mask).sum(dim=1) / (valid_mask.sum(dim=1)) if valid_mask.sum(dim=1) != 0 else 0
         
         # Project the final single vector.
         projected = self.projector(pooled)
