@@ -158,6 +158,9 @@ def assert_tensor_values_equal(expected: torch.Tensor, actual: torch.Tensor, lab
         f"Tensor values differ for {label}: "
         f"shape={tuple(expected_cpu.shape)}, dtype={expected_cpu.dtype}, "
         f"max_abs_diff={_max_abs_diff(expected_cpu, actual_cpu)}"
+        # print number of mismatches elements
+        f", num_mismatches={(expected_cpu != actual_cpu).sum().item()}"
+
     )
 
 
