@@ -1196,7 +1196,7 @@ class Encoder(FlexiVitBase):
         # Now all the places where we want to keep the token are at the front of the tensor
         x = x.gather(1, indices[:, :, None].expand_as(x))
         # Now all tokens that should be kept are first in the tensor
-
+        # TODO put breakpoint 
         # set masked values to 0 (not really necessary since we'll ignore them anyway)
         x = x * sorted_mask.unsqueeze(-1)
 

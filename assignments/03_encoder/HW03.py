@@ -74,7 +74,7 @@ class Attention(nn.Module):
         # This way we concat the heads for the same token? is it what we want to do?
         # We use torch.matmul (@) to multiply the queries by the keys. 
         # k.transpose(-2, -1) flips the last two dimensions of K so the shapes align for dot product.
-        # Try with scaled_dot_product_attention
+        # TODO Try with scaled_dot_product_attention
         scores = (q @ k.transpose(-2, -1)) * self.scale # (B, num_heads, N_q, N_kv)
 
         # 3. Apply the Mask (Optional)
