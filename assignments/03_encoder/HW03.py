@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 sys.path.append(str(Path(__file__).resolve().parents[1] / "02_patchify_encoding"))
 from HW02 import PatchEmbeddings, CompositeEncoding
+from einops import rearrange, repeat
 
 class Attention(nn.Module):
     '''
@@ -69,33 +70,15 @@ class Attention(nn.Module):
         k = rearrange(self.k_proj(y), 'B N_kv (num_heads head_dim) -> B num_heads N_kv head_dim', num_heads=self.num_heads, head_dim=self.head_dim)
         v = rearrange(self.v_proj(y), 'B N_kv (num_heads head_dim) -> B num_heads N_kv head_dim', num_heads=self.num_heads, head_dim=self.head_dim)
         
-        # 2. Calculate Attention Scores (Q * K^T) -> B num_heads N_q head_dim @ B num_heads head_dim N_kv => (B, num_heads, N_q, N_kv), 4D multiplication mult the last two dimensions.
-        # This is like a 2D matrix of 2D matrices: for each sample in the batch, for each head, we have a (N_q, head_dim) query matrix multiplied by a (head_dim, N_kv) key matrix, resulting in a (N_q, N_kv) score matrix for each head.
-        # This way we concat the heads for the same token? is it what we want to do?
-        # We use torch.matmul (@) to multiply the queries by the keys. 
-        # k.transpose(-2, -1) flips the last two dimensions of K so the shapes align for dot product.
-        # TODO Try with scaled_dot_product_attention
-        scores = (q @ k.transpose(-2, -1)) * self.scale # (B, num_heads, N_q, N_kv)
-
-        # 3. Apply the Mask (Optional)
+        # 2. & 3. Scaled dot-product attention (matches reference F.scaled_dot_product_attention numerics)
         if attn_mask is not None:
-            # attn_mask is a True/False matrix where True indicates positions that should be masked (not attended to).
-            # attn_mask is usually (B, sequence length). We need it to broadcast to (B, num_heads, N_q, N_kv).
-            # We replace True (masked) values with a massive negative number (-1e9).
-            # When passed through softmax, e^(-1e9) becomes 0, so the network completely ignores those patches.
-            # The mask is on the y patches (N_kv)
-            scores = scores.masked_fill(attn_mask.unsqueeze(1).unsqueeze(2), -np.inf)
-            
-        # 4. Convert scores to probabilities (Softmax)
-        attn_weights = F.softmax(scores, dim=-1)
-        
-        # 5. Multiply by Values
-        # We multiply our probability weights by the actual information (V)
-        out = attn_weights @ v # Shape: (B, num_heads, N_q, head_dim)
-        
-        # 6. Re-assemble the heads
-        # Transpose back to (B, N_q, num_heads, head_dim) and flatten the last two dimensions to get back to (B, N_q, D)
-        # contiguous() is used to ensure the tensor is stored in memory transposed (1,2), which is necessary for the view operation to work correctly.
+            # Student convention: True = masked-out. SDPA convention: True = participate. Invert + expand.
+            sdpa_mask = (~attn_mask)[:, None, None].repeat(1, self.num_heads, N_q, 1)
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=sdpa_mask)
+        else:
+            out = F.scaled_dot_product_attention(q, k, v)
+
+        # 4. Re-assemble the heads
         out = out.transpose(1, 2).contiguous().view(B, N_q, D)
         
         # 7. Final linear projection
@@ -173,11 +156,12 @@ class BaseEncoderDecoder(nn.Module):
     def __init__(self, modality: str, patch_size: int, embedding_size: int, num_heads: int=0, depth: int=0, mlp_ratio: int=1):
         super().__init__()
         self.modality = modality
+        self.patch_size = patch_size
         self.blocks = nn.ModuleList([
             AttentionBlock(embedding_size, num_heads, mlp_ratio)
             for _ in range(depth)
             ])
-        self.encodings = CompositeEncoding(modality, embedding_size=128)
+        self.encodings = CompositeEncoding(modality, embedding_size=embedding_size)
         self.apply(self._init_linear_weights)
     
     @staticmethod
@@ -215,15 +199,14 @@ class Encoder(BaseEncoderDecoder):
         # Patchification step
         self.patch_embed = PatchEmbeddings(patch_size, embedding_size, modality)
 
-        # The Mask Token - shpuldnt be learned
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, embedding_size))
-
         # Final Normalization & Projector
         # Standard in Vision Transformers to normalize before pooling.
         self.norm = nn.LayerNorm(embedding_size)
         
         # This linear layer acts as a final "summary translator" to project the pooled representation.
         self.projector = nn.Linear(embedding_size, embedding_size)
+
+        self.apply(self._init_linear_weights)
 
     def forward(self, x: dict[str, torch.Tensor], apply_attn: bool = True) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         '''
@@ -234,59 +217,81 @@ class Encoder(BaseEncoderDecoder):
             apply_attn: A boolean flag indicating whether to apply the attention blocks. 
         '''
         
-        # --- Patchification ---
+        # --- 1. Patchification & Encoding ---
         patch_dict = self.patch_embed(x, self.modality)
-        patch_data = patch_dict[self.modality] # (B, H', W', T, Bs, D)
-        mask = patch_dict[f'{self.modality}_mask'] # (B, H', W', T) or (B, H', W', T, Bs)
+        patch_data = patch_dict[self.modality]      # Shape: (B, H', W', T, Bs, D)
+        mask = patch_dict[f'{self.modality}_mask']  # Shape: (B, H', W', T, Bs)
 
-        # --- Add Composite Encodings ---
         encoded_data = patch_data + self.encodings(patch_dict)
 
-        # --- Flattening to Sequence ---
+        # --- 2. Flattening into Sequence Space ---
         B, H, W, T, Bs, D = encoded_data.shape
-        
-        # Flatten the 6D tensor into standard 3D Transformer shape: (B, Seq_Len, D)
         seq_data = rearrange(encoded_data, 'b h w t bs d -> b (h w t bs) d')
-        
-        # Flatten the mask across all dimensions so it aligns with the token sequence.
-        # if mask.dim() == 4:
-        #     flat_mask = rearrange(mask, 'b h w t -> b (h w t)')
-        #     flat_mask = flat_mask.repeat_interleave(Bs, dim=1) # (B, Seq_Len)
-        # else:
         flat_mask = rearrange(mask, 'b h w t bs -> b (h w t bs)')
         
-        # --- Remove Masked Tokens ---
-        # making the attn mask matrix to indicate which tokens are masked (True) and which are not (False)
-        bool_attn_mask = (flat_mask != MaskValue.ONLINE_ENCODER) # (B, Seq_Len)
+        # Generate raw True/False tracking mask: True = KEEP (online token)
+        keep_boolean_mask = (flat_mask == MaskValue.ONLINE_ENCODER) # (B, Seq_Len)
 
-        # --- Apply Attention Blocks ---
-        x_processed = seq_data
-        if apply_attn:
-            # we are preforming multi-head attention in a sequential way, passing the output of one block as the input to the next.
+        # --- 3. Dynamic Masked Token Removal ---
+        # Sort mask descending: True values (1s) cluster at front, False values (0s) at back.
+        sorted_keep_mask, sorting_indices = torch.sort(keep_boolean_mask.int(), dim=1, descending=True, stable=True)
+        
+        # Shift data tokens into identical alignment using sorted index references
+        x_processed = seq_data.gather(1, sorting_indices.unsqueeze(-1).expand_as(seq_data))
+        
+        # Dynamically truncate length to only cover the maximum amount of real tokens seen across the batch slice
+        sequence_lengths = sorted_keep_mask.sum(dim=-1)
+        max_active_length = sequence_lengths.max().item()
+        
+        x_processed = x_processed[:, :max_active_length]
+        truncated_keep_mask = sorted_keep_mask[:, :max_active_length].bool()
+        
+        # Invert mask tracking to align with standard block expectations (True = Masked/Dropped)
+        block_attn_mask = ~truncated_keep_mask
+
+        # --- 4. Apply Attention Blocks Over Compressed Tensor ---
+        if apply_attn and max_active_length > 0:
             for block in self.blocks:
-                x_processed = block(x_processed, attn_mask=bool_attn_mask)
+                x_processed = block(x_processed, attn_mask=block_attn_mask)
 
-        # --- Add Back the Masked Tokens ---
-        x_restored = torch.where(
-            bool_attn_mask.unsqueeze(-1), # where to add
-            self.mask_token.to(x_processed.dtype), # what to add
-            x_processed # target
+        # Apply LayerNorm strictly to visible valid tokens before filling empty slots
+        x_processed = self.norm(x_processed)
+        
+        # --- 5. Reconstruction Step (Restore Sequence Order) ---
+        # Allocate an empty zero-matrix structure on the correct device
+        restored_tensor = torch.zeros(
+            (B, flat_mask.shape[1], D), 
+            device=x_processed.device, 
+            dtype=x_processed.dtype
         )
-
-        # --- Global Pooling & Projection ---
-        # x_norm = self.norm(x_restored) # should be regular normalization, sum all the tokens together, and divide by the total number of unmasked tokens 
-
-        # We make a matrix of the positions of the valid (unmasked) tokens, dimentions: (B, Seq_Len, 1). 
-        valid_mask = (~bool_attn_mask).float().unsqueeze(-1)
         
-        # We sum all the valid tokens together, and divide by the total number of valid tokens to get the average (Mean Pooling).
-        pooled = (x_restored * valid_mask).sum(dim=1) / (valid_mask.sum(dim=1)) if valid_mask.sum(dim=1) != 0 else 0
+        # Convert our tracking index back to a boolean mask over the uncompressed flat shape
+        uncompressed_fill_mask = torch.zeros((B, flat_mask.shape[1]), dtype=torch.bool, device=seq_data.device)
+        uncompressed_fill_mask[:, :max_active_length] = truncated_keep_mask
         
-        # Project the final single vector.
+        # Step A: Map active tokens into temporary packed positions
+        restored_tensor[uncompressed_fill_mask] = x_processed[truncated_keep_mask]
+        
+        # Step B: Scatter everything back into its precise starting position index layout
+        x_restored = restored_tensor.new_zeros(restored_tensor.shape)
+        x_restored = x_restored.scatter(1, sorting_indices.unsqueeze(-1).expand_as(restored_tensor), restored_tensor)
+
+        # --- 6. Global Pooling & Projection ---
+        # Calculate pool denominator from valid unmasked tokens matrix counts
+        valid_counts = keep_boolean_mask.float().sum(dim=1, keepdim=True) # (B, 1)
+        
+        # Zero out any non-data tracking slots before running sum pooling
+        clean_data_mask = keep_boolean_mask.float().unsqueeze(-1)
+        pooled = (x_restored * clean_data_mask).sum(dim=1) / torch.clamp(valid_counts, min=1.0)
+        
         projected = self.projector(pooled)
+
+        # --- 7. Unflatten back to original shape ---
+        # Reshape (B, Seq_Len, D) back to (B, H, W, T, Bs, D)
+        x_restored = rearrange(x_restored, 'b (h w t bs) d -> b h w t bs d', h=H, w=W, t=T, bs=Bs)
 
         return {
             self.modality: x_restored,                 # Maps to output[MODALITY]
-            f"{self.modality}_mask": flat_mask,        # Maps to output["sentinel2_l2a_mask"]
+            f"{self.modality}_mask": mask,             # Maps to output["sentinel2_l2a_mask"]
             "pooled_tokens": projected                 # Maps to output["pooled_tokens"]
         }
