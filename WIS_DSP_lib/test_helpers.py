@@ -152,8 +152,8 @@ def assert_tensor_values_equal(expected: torch.Tensor, actual: torch.Tensor, lab
     assert isinstance(actual, torch.Tensor), f"Type mismatch for {label}"
     expected_cpu = expected.detach().cpu()
     actual_cpu = actual.detach().cpu()
-    assert expected_cpu.shape == actual_cpu.shape, f"Shape mismatch for {label}"
-    assert expected_cpu.dtype == actual_cpu.dtype, f"Dtype mismatch for {label}"
+    assert expected_cpu.shape == actual_cpu.shape, f"Shape mismatch for {label} (expected {tuple(expected_cpu.shape)}, got {tuple(actual_cpu.shape)})"
+    assert expected_cpu.dtype == actual_cpu.dtype, f"Dtype mismatch for {label} (expected {expected_cpu.dtype}, got {actual_cpu.dtype})"
     assert torch.equal(expected_cpu, actual_cpu), (
         f"Tensor values differ for {label}: "
         f"shape={tuple(expected_cpu.shape)}, dtype={expected_cpu.dtype}, "
