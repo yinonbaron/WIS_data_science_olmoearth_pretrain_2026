@@ -169,10 +169,9 @@ class CompositeEncoding(nn.Module):
         # Divide embedding dimension by 4 for the 4 encoding types
         self.d_enc = embedding_size // 4
         
-        # 1. Channel Encoding: Learnable embedding
+        # 1. Channel Encoding: Learnable parameter (zeros, matching reference which uses Parameter not Embedding)
         self.num_bandsets = len(BANDSETS[modality])
-        self.channel_embed = nn.Embedding(self.num_bandsets, self.d_enc)
-        nn.init.zeros_(self.channel_embed.weight)
+        self.channel_embed = nn.Parameter(torch.zeros(self.num_bandsets, self.d_enc))
         
         # 3. Month Encoding: Fixed embedding
         angles = torch.arange(0, 13) / (12 / (2 * 3.141592653589793))
@@ -213,8 +212,7 @@ class CompositeEncoding(nn.Module):
         device = patch_data.device
         
         # 1. Channel Encoding
-        c_idx = torch.arange(Bs, device=device)
-        c_enc_base = self.channel_embed(c_idx)
+        c_enc_base = self.channel_embed.to(device)  # (num_bandsets, d_enc)
         c_enc = c_enc_base.view(1, 1, 1, 1, Bs, self.d_enc).expand(B, H_prime, W_prime, T, Bs, self.d_enc)
         
         # 2. Time Encoding
