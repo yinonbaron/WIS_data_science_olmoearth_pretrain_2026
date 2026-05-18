@@ -157,3 +157,6 @@ cython_debug/
 # macOS
 .DS_Store
 assignments/03_encoder/_check_wis.py
+CLAUDE.md
+pyproject.toml
+uv.lock
