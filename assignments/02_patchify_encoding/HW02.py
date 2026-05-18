@@ -174,7 +174,7 @@ class CompositeEncoding(nn.Module):
         self.channel_embed = nn.Parameter(torch.zeros(self.num_bandsets, self.d_enc))
         
         # 3. Month Encoding: Fixed embedding
-        angles = torch.arange(0, 13) / (12 / (2 * 3.141592653589793))
+        angles = torch.arange(0, 13) / (12 / (2 * np.pi))
         dim_per_table = self.d_enc // 2
         sin_table = torch.sin(angles.unsqueeze(-1).expand(-1, dim_per_table))
         cos_table = torch.cos(angles.unsqueeze(-1).expand(-1, dim_per_table))
