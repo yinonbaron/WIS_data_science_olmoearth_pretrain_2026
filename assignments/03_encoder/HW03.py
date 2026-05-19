@@ -205,9 +205,9 @@ class Encoder(BaseEncoderDecoder):
         
         # This linear layer acts as a final "summary translator" to project the pooled representation.
         self.projector = nn.Linear(embedding_size, embedding_size)
-        self.frozen_projector = nn.Linear(embedding_size, embedding_size)
 
         self.apply(self._init_linear_weights)
+
 
     def forward(self, x: dict[str, torch.Tensor], apply_attn: bool = True) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         '''
@@ -223,17 +223,23 @@ class Encoder(BaseEncoderDecoder):
         patch_data = patch_dict[self.modality]      # Shape: (B, H', W', T, Bs, D)
         mask = patch_dict[f'{self.modality}_mask']  # Shape: (B, H', W', T, Bs)
 
-        encoded_data = patch_data + self.encodings(patch_dict)
+        # Conditionally add positional/composite encodings
+        if apply_attn:
+            patch_data = patch_data + self.encodings(patch_dict)
 
         # --- 2. Flattening into Sequence Space ---
-        B, H, W, T, Bs, D = encoded_data.shape
-        seq_data = rearrange(encoded_data, 'b h w t bs d -> b (h w t bs) d')
+        # This happens in both paths, so we do it once here.
+        B, H, W, T, Bs, D = patch_data.shape
+        seq_data = rearrange(patch_data, 'b h w t bs d -> b (h w t bs) d')
         flat_mask = rearrange(mask, 'b h w t bs -> b (h w t bs)')
-         
-        if apply_attn:
-             # Generate raw True/False tracking mask: True = KEEP (online token)
-            keep_boolean_mask = (flat_mask == MaskValue.ONLINE_ENCODER) # (B, Seq_Len)
+        
+        # Generate raw True/False tracking mask: True = KEEP (online token)
+        keep_boolean_mask = (flat_mask == MaskValue.ONLINE_ENCODER) # (B, Seq_Len)
+        
+        # Baseline state for x_restored
+        x_restored = seq_data
 
+        if apply_attn:
             # --- 3. Dynamic Masked Token Removal ---
             # Sort mask descending: True values (1s) cluster at front, False values (0s) at back.
             sorted_keep_mask, sorting_indices = torch.sort(keep_boolean_mask.int(), dim=1, descending=True, stable=True)
@@ -277,19 +283,15 @@ class Encoder(BaseEncoderDecoder):
             x_restored = restored_tensor.new_zeros(restored_tensor.shape)
             x_restored = x_restored.scatter(1, sorting_indices.unsqueeze(-1).expand_as(restored_tensor), restored_tensor)
 
-            # --- 6. Global Pooling & Projection ---
-            # Calculate pool denominator from valid unmasked tokens matrix counts
-            valid_counts = keep_boolean_mask.float().sum(dim=1, keepdim=True) # (B, 1)
-            
-            # Zero out any non-data tracking slots before running sum pooling
-            clean_data_mask = keep_boolean_mask.float().unsqueeze(-1)
-            pooled = (x_restored * clean_data_mask).sum(dim=1) / torch.clamp(valid_counts, min=1.0)
-            projected = self.projector(pooled)
-        else:
-            projected = None
-            x_restored = self.frozen_projector(seq_data)
+        # --- 6. Global Pooling & Projection ---
+        # Calculate pool denominator from valid unmasked tokens matrix counts
+        valid_counts = keep_boolean_mask.float().sum(dim=1, keepdim=True) # (B, 1)
+        
+        # Zero out any non-data tracking slots before running sum pooling
+        clean_data_mask = keep_boolean_mask.float().unsqueeze(-1)
+        pooled = (x_restored * clean_data_mask).sum(dim=1) / torch.clamp(valid_counts, min=1.0)
+        projected = self.projector(pooled)
 
-    
         # --- 7. Unflatten back to original shape ---
         # Reshape (B, Seq_Len, D) back to (B, H, W, T, Bs, D)
         x_restored = rearrange(x_restored, 'b (h w t bs) d -> b h w t bs d', h=H, w=W, t=T, bs=Bs)
