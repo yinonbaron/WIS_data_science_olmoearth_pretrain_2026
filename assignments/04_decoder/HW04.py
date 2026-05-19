@@ -167,16 +167,19 @@ class Model(nn.Module):
         # 2. Decode: cross-attention from DECODER tokens attending to ONLINE_ENCODER context
         decoded = self.decoder(latent)
 
-        # 3. Target encoder: all non-MISSING tokens visible, no encodings, no attention blocks
-        #    Mirrors reference token_exit_cfg={MODALITY: 0} which returns norm(patchified) tokens
-        mask = batch[self.mask_name]
-        unmasked_mask = torch.where(mask == MaskValue.TARGET_ENCODER_ONLY, mask, torch.zeros_like(mask))
-        unmasked_batch = {
-            self.modality: batch[self.modality],
+        # 3. Target encoder: unmask everything except entries already MISSING
+        batch_for_target_encoder = deepcopy(batch)
+        mask = batch_for_target_encoder[self.mask_name]
+
+        unmasked_mask = mask * (mask == MaskValue.MISSING)
+
+        masked_batch = {
+            self.modality: batch_for_target_encoder[self.modality],
             self.mask_name: unmasked_mask,
-            "timestamps": batch["timestamps"],
+            "timestamps": batch_for_target_encoder["timestamps"],
         }
+        
         with torch.no_grad():
-            target_output = self.target_encoder(unmasked_batch)
+            target_output = self.target_encoder(masked_batch, apply_attn=False)
 
         return latent, decoded, target_output
