@@ -205,6 +205,7 @@ class Encoder(BaseEncoderDecoder):
         
         # This linear layer acts as a final "summary translator" to project the pooled representation.
         self.projector = nn.Linear(embedding_size, embedding_size)
+        self.frozen_projector = nn.Linear(embedding_size, embedding_size)
 
         self.apply(self._init_linear_weights)
 
@@ -228,64 +229,67 @@ class Encoder(BaseEncoderDecoder):
         B, H, W, T, Bs, D = encoded_data.shape
         seq_data = rearrange(encoded_data, 'b h w t bs d -> b (h w t bs) d')
         flat_mask = rearrange(mask, 'b h w t bs -> b (h w t bs)')
-        
-        # Generate raw True/False tracking mask: True = KEEP (online token)
-        keep_boolean_mask = (flat_mask == MaskValue.ONLINE_ENCODER) # (B, Seq_Len)
+         
+        if apply_attn:
+             # Generate raw True/False tracking mask: True = KEEP (online token)
+            keep_boolean_mask = (flat_mask == MaskValue.ONLINE_ENCODER) # (B, Seq_Len)
 
-        # --- 3. Dynamic Masked Token Removal ---
-        # Sort mask descending: True values (1s) cluster at front, False values (0s) at back.
-        sorted_keep_mask, sorting_indices = torch.sort(keep_boolean_mask.int(), dim=1, descending=True, stable=True)
-        
-        # Shift data tokens into identical alignment using sorted index references
-        x_processed = seq_data.gather(1, sorting_indices.unsqueeze(-1).expand_as(seq_data))
-        
-        # Dynamically truncate length to only cover the maximum amount of real tokens seen across the batch slice
-        sequence_lengths = sorted_keep_mask.sum(dim=-1)
-        max_active_length = sequence_lengths.max().item()
-        
-        x_processed = x_processed[:, :max_active_length]
-        truncated_keep_mask = sorted_keep_mask[:, :max_active_length].bool()
-        
-        # Invert mask tracking to align with standard block expectations (True = Masked/Dropped)
-        block_attn_mask = ~truncated_keep_mask
+            # --- 3. Dynamic Masked Token Removal ---
+            # Sort mask descending: True values (1s) cluster at front, False values (0s) at back.
+            sorted_keep_mask, sorting_indices = torch.sort(keep_boolean_mask.int(), dim=1, descending=True, stable=True)
+            
+            # Shift data tokens into identical alignment using sorted index references
+            x_processed = seq_data.gather(1, sorting_indices.unsqueeze(-1).expand_as(seq_data))
+            
+            # Dynamically truncate length to only cover the maximum amount of real tokens seen across the batch slice
+            sequence_lengths = sorted_keep_mask.sum(dim=-1)
+            max_active_length = sequence_lengths.max().item()
+            
+            x_processed = x_processed[:, :max_active_length]
+            truncated_keep_mask = sorted_keep_mask[:, :max_active_length].bool()
+            
+            # Invert mask tracking to align with standard block expectations (True = Masked/Dropped)
+            block_attn_mask = ~truncated_keep_mask
 
-        # --- 4. Apply Attention Blocks Over Compressed Tensor ---
-        if apply_attn and max_active_length > 0:
+            # --- 4. Apply Attention Blocks Over Compressed Tensor ---
             for block in self.blocks:
                 x_processed = block(x_processed, attn_mask=block_attn_mask)
+            
+            # Apply LayerNorm strictly to visible valid tokens before filling empty slots
+            x_processed = self.norm(x_processed)
 
-        # Apply LayerNorm strictly to visible valid tokens before filling empty slots
-        x_processed = self.norm(x_processed)
-        
-        # --- 5. Reconstruction Step (Restore Sequence Order) ---
-        # Allocate an empty zero-matrix structure on the correct device
-        restored_tensor = torch.zeros(
-            (B, flat_mask.shape[1], D), 
-            device=x_processed.device, 
-            dtype=x_processed.dtype
-        )
-        
-        # Convert our tracking index back to a boolean mask over the uncompressed flat shape
-        uncompressed_fill_mask = torch.zeros((B, flat_mask.shape[1]), dtype=torch.bool, device=seq_data.device)
-        uncompressed_fill_mask[:, :max_active_length] = truncated_keep_mask
-        
-        # Step A: Map active tokens into temporary packed positions
-        restored_tensor[uncompressed_fill_mask] = x_processed[truncated_keep_mask]
-        
-        # Step B: Scatter everything back into its precise starting position index layout
-        x_restored = restored_tensor.new_zeros(restored_tensor.shape)
-        x_restored = x_restored.scatter(1, sorting_indices.unsqueeze(-1).expand_as(restored_tensor), restored_tensor)
+            # --- 5. Reconstruction Step (Restore Sequence Order) ---
+            # Allocate an empty zero-matrix structure on the correct device
+            restored_tensor = torch.zeros(
+                (B, flat_mask.shape[1], D), 
+                device=x_processed.device, 
+                dtype=x_processed.dtype
+            )
+            
+            # Convert our tracking index back to a boolean mask over the uncompressed flat shape
+            uncompressed_fill_mask = torch.zeros((B, flat_mask.shape[1]), dtype=torch.bool, device=seq_data.device)
+            uncompressed_fill_mask[:, :max_active_length] = truncated_keep_mask
+            
+            # Step A: Map active tokens into temporary packed positions
+            restored_tensor[uncompressed_fill_mask] = x_processed[truncated_keep_mask]
+            
+            # Step B: Scatter everything back into its precise starting position index layout
+            x_restored = restored_tensor.new_zeros(restored_tensor.shape)
+            x_restored = x_restored.scatter(1, sorting_indices.unsqueeze(-1).expand_as(restored_tensor), restored_tensor)
 
-        # --- 6. Global Pooling & Projection ---
-        # Calculate pool denominator from valid unmasked tokens matrix counts
-        valid_counts = keep_boolean_mask.float().sum(dim=1, keepdim=True) # (B, 1)
-        
-        # Zero out any non-data tracking slots before running sum pooling
-        clean_data_mask = keep_boolean_mask.float().unsqueeze(-1)
-        pooled = (x_restored * clean_data_mask).sum(dim=1) / torch.clamp(valid_counts, min=1.0)
-        
-        projected = self.projector(pooled)
+            # --- 6. Global Pooling & Projection ---
+            # Calculate pool denominator from valid unmasked tokens matrix counts
+            valid_counts = keep_boolean_mask.float().sum(dim=1, keepdim=True) # (B, 1)
+            
+            # Zero out any non-data tracking slots before running sum pooling
+            clean_data_mask = keep_boolean_mask.float().unsqueeze(-1)
+            pooled = (x_restored * clean_data_mask).sum(dim=1) / torch.clamp(valid_counts, min=1.0)
+            projected = self.projector(pooled)
+        else:
+            projected = None
+            x_restored = self.frozen_projector(seq_data)
 
+    
         # --- 7. Unflatten back to original shape ---
         # Reshape (B, Seq_Len, D) back to (B, H, W, T, Bs, D)
         x_restored = rearrange(x_restored, 'b (h w t bs) d -> b h w t bs d', h=H, w=W, t=T, bs=Bs)
@@ -294,4 +298,4 @@ class Encoder(BaseEncoderDecoder):
             self.modality: x_restored,                 # Maps to output[MODALITY]
             f"{self.modality}_mask": mask,             # Maps to output["sentinel2_l2a_mask"]
             "pooled_tokens": projected                 # Maps to output["pooled_tokens"]
-        }
+         }
