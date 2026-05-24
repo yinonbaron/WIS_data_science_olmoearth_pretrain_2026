@@ -3,7 +3,6 @@ from WIS_DSP_lib.constants import *
 import torch
 from torch import nn
 from einops import rearrange, repeat
-from WIS_DSP_lib.patchify import PatchEmbeddings, CompositeEncoding
 from WIS_DSP_lib.dataloader import DataLoader
 import torch.nn.functional as F
 import sys
