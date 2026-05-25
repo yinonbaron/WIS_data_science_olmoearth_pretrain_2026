@@ -48,7 +48,7 @@ class TrainModule():
             return [self._move_to_device(val) for val in value]
         return value
     
-    def train_batch(self, batch):
+    def train_batch(self, batch, tau=0.1, weight=0.1):
         """
         A method that performs a forward pass through the model, calculates the loss, and performs backpropagation for a single batch of data.
 
@@ -64,8 +64,6 @@ class TrainModule():
         latent_a, decoded_a, target_output_a = self.model.model_forward(batch_a)
         latent_b, decoded_b, target_output_b = self.model.model_forward(batch_b)
 
-        tau = 0.1
-
         # --- Patch discrimination loss ---
         # For each batch: compare the decoder's predicted tokens against the target encoder
         # encoder's tokens at the same DECODER-masked positions, per sample.
@@ -77,19 +75,19 @@ class TrainModule():
             # Concatenate all DECODER tokens across the batch into a single sequence,
             # then split back per sample using per-sample token counts.
             decoder_pos = mask == MaskValue.DECODER
-            all_pred = F.normalize(pred[decoder_pos].unsqueeze(0), p=2, dim=-1)  # (1, N_total, D)
-            all_tgt  = F.normalize(tgt[decoder_pos].unsqueeze(0),  p=2, dim=-1)  # (1, N_total, D)
+            all_pred = F.normalize(pred[decoder_pos], p=2, dim=-1)  # (N_total, D)
+            all_tgt  = F.normalize(tgt[decoder_pos],  p=2, dim=-1)  # (N_total, D)
             count = decoder_pos.sum(dim=-1)  # (B==num_of_clips,)
 
             losses, start = [], 0
             for c in count:
                 end = start + c
-                pred_s = all_pred[:, start:end, :]   # (1, c, D)
-                tgt_s  = all_tgt[:,  start:end, :]   # (1, c, D)
-                # (1, c, c) similarity matrix; each row i should be most similar to col i
-                scores = torch.einsum('npd,nqd->npq', pred_s, tgt_s) / tau
-                labels = torch.arange(c, dtype=torch.long, device=pred_s.device)[None]
-                loss_s = F.cross_entropy(scores.flatten(0, 1), labels.flatten(0, 1), reduction='none') * (tau * 2)
+                pred_s = all_pred[start:end, :]   # (c, D)
+                tgt_s  = all_tgt[start:end, :]   # (c, D)
+                # (c, c) similarity matrix; each row i should be most similar to col i
+                scores = torch.einsum('pd,qd->pq', pred_s, tgt_s) / tau
+                labels = torch.arange(c, dtype=torch.long, device=pred_s.device)
+                loss_s = F.cross_entropy(scores, labels, reduction='none') * (tau * 2)
                 losses.append(loss_s.mean())
                 start = end
             return torch.stack(losses).mean()
@@ -105,9 +103,9 @@ class TrainModule():
         # B×B similarity matrix; diagonal = positive pairs (same sample, different augmentation)
         logits = pooled_a @ pooled_b.T / tau
         labels = torch.arange(pooled_a.shape[0], device=pooled_a.device)
-        nce_loss = tau * F.cross_entropy(logits, labels)
+        nce_loss = F.cross_entropy(logits, labels)
 
-        total_loss = patch_loss + nce_loss
+        total_loss = patch_loss + weight * nce_loss
         total_loss.backward()
         return total_loss
 
