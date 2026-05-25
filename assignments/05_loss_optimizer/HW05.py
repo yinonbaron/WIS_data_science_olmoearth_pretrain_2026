@@ -33,7 +33,7 @@ class TrainModule():
         self.modality = modality
         self.mask_name = f"{modality}_mask"
         self.model = model
-        self.device = model.device
+        self.device = next(model.parameters()).device
         self.dataloader = dataloader
         self.optimizer = optimizer
 
@@ -105,7 +105,7 @@ class TrainModule():
         # B×B similarity matrix; diagonal = positive pairs (same sample, different augmentation)
         logits = pooled_a @ pooled_b.T / tau
         labels = torch.arange(pooled_a.shape[0], device=pooled_a.device)
-        nce_loss = F.cross_entropy(logits, labels)
+        nce_loss = tau * F.cross_entropy(logits, labels)
 
         total_loss = patch_loss + nce_loss
         total_loss.backward()
